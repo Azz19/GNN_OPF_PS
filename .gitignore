@@ -1,0 +1,13 @@
+# python / venv
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# experiment logs (findings are captured in RESULTS_*.md)
+*.log
+
+# OS / editor noise
+.DS_Store
+*~

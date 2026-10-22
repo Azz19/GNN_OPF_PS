@@ -1,0 +1,5 @@
+torch>=2.0
+pandapower>=2.14
+numpy>=1.26
+scipy>=1.11
+pandas>=2.0
