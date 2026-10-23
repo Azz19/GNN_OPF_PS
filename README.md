@@ -23,6 +23,9 @@ feasibility write-up.
 | `src/run_experiment.py` | Trains both models, reports MSE, PQ-bus power-balance violation (pu), inference time, parameter counts, and DEQ iteration statistics |
 | `src/run_experiment2.py` | Feasibility pivot: physics loss on/off × Newton correction on/off, with cost-gap and correction-distance reporting |
 | `src/evaluate_stress.py` | **Risk axis**: trains both predictors on the nominal load band, then evaluates the corrected pipeline on out-of-distribution stress splits — heavy loads (1.05–1.30×) and N-1 line outages — reporting tail metrics (p99/max violation, correction convergence rate, cost gap) |
+| `src/schema_probe.py` | Stdlib-only probe: prints the exact JSON schema of an OPFData shard (feature names, shapes, split mapping). Run on the GPU workstation after downloading one shard |
+| `docs/opfdata-runbook.md` | GPU scale-up runbook: verified bucket/shard/split facts, download commands, tensor contract, and the loader spec for `src/opfdata_loader.py` (next code task) |
+| `docs/opfdata-scaleup.md` | OPFData benchmark brief and the scale-up path for the scalability axis |
 
 Message passing is plain-PyTorch (no torch-geometric dependency).
 

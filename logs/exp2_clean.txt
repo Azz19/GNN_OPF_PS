@@ -1,0 +1,25 @@
+Generating 200 AC-OPF samples (case14) ...
+  200/200 generated (0 failed)
+Generated 200 solved samples, 0 solver failures.
+
+== DEQ (MSE only) ==
+    epoch 2/10 train loss 0.000299
+    epoch 4/10 train loss 0.000166
+    epoch 6/10 train loss 0.000129
+    epoch 8/10 train loss 0.000119
+    epoch 10/10 train loss 0.000116
+  trained in 21s
+  [raw] MSE 6.726e-05 | viol mean 0.1282 pu, max 0.2607 pu | cost gap +3.110%
+  [corr] MSE 2.943e-04 | viol mean 0.0000 pu, max 0.0000 pu | cost gap +0.398%
+  [corr] Newton converged 100% | iters mean 2.0 p95 2 | state move: dVm 0.0149 pu, dVa 0.0354 rad
+
+== DEQ + physics loss (lam=1.0) ==
+    epoch 2/10 train loss 0.011197
+    epoch 4/10 train loss 0.005627
+    epoch 6/10 train loss 0.004566
+    epoch 8/10 train loss 0.004049
+    epoch 10/10 train loss 0.003817
+  trained in 19s
+  [raw] MSE 7.683e-04 | viol mean 0.0436 pu, max 0.0814 pu | cost gap +149.539%
+  [corr] MSE 9.949e-04 | viol mean 0.0000 pu, max 0.0000 pu | cost gap +145.165%
+  [corr] Newton converged 100% | iters mean 2.0 p95 2 | state move: dVm 0.0141 pu, dVa 0.0307 rad

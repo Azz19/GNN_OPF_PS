@@ -1,0 +1,36 @@
+Generating 200 AC-OPF samples (case14) ...
+  200/200 generated (0 failed)
+Generated 200 solved samples, 0 solver failures.
+
+== FixedDepthGNN (107,522 params) ==
+    epoch 2/10  train MSE 0.000716
+    epoch 4/10  train MSE 0.000227
+    epoch 6/10  train MSE 0.000169
+    epoch 8/10  train MSE 0.000150
+    epoch 10/10  train MSE 0.000134
+  mse: 0.00014028056302777258
+  viol_max_pu: 0.46533222029452814
+  viol_mean_pu: 0.16475763614321753
+  infer_ms: 1.836101075014085
+  params: 107522
+  train_s: 22.704056189000767
+
+== DEQGNN (22,082 params) ==
+    epoch 2/10  train MSE 0.000255
+    epoch 4/10  train MSE 0.000189
+    epoch 6/10  train MSE 0.000156
+    epoch 8/10  train MSE 0.000133
+    epoch 10/10  train MSE 0.000123
+  mse: 6.320672437141184e-05
+  viol_max_pu: 0.24012431588289634
+  viol_mean_pu: 0.11527111600905063
+  infer_ms: 7.46928650009977
+  deq_iters_mean: 23.0
+  deq_iters_p95: 23.0
+  deq_iters_max: 23
+  params: 22082
+  train_s: 23.0968873110005
+
+=== SUMMARY ===
+FixedDepthGNN {'mse': 0.00014028056302777258, 'viol_max_pu': 0.46533222029452814, 'viol_mean_pu': 0.16475763614321753, 'infer_ms': 1.836101075014085, 'params': 107522, 'train_s': 22.704056189000767}
+DEQGNN {'mse': 6.320672437141184e-05, 'viol_max_pu': 0.24012431588289634, 'viol_mean_pu': 0.11527111600905063, 'infer_ms': 7.46928650009977, 'deq_iters_mean': 23.0, 'deq_iters_p95': 23.0, 'deq_iters_max': 23, 'params': 22082, 'train_s': 23.0968873110005}
