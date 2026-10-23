@@ -23,7 +23,10 @@ grid.nodes.shunt      [n_shunt, 2] [bs, gs] pu — IEEE14's only shunt is the
 grid.edges.ac_line    features [9]:  [angmin, angmax, b_fr, b_to, r, x,
                                       rate_a, rate_b, rate_c]
 grid.edges.transformer features [11]: [angmin, angmax, r, x, rate_a, rate_b,
-                                      rate_c, tap, shift, 0, 0]  (no b)
+                                      rate_c, tap, shift, b_fr, b_to]
+    (b_fr/b_to are the magnetizing susceptances — zero in case14, but
+    0.082 / 0.0222 pu on two case118 transformers; omitting them leaves
+    ~0.09 pu phantom Q mismatch on the labels.)
 solution.nodes.bus    [n_bus, 2]   [va (rad), vm]     <-- note the order
 solution.nodes.generator [n_gen, 2] [pg, qg] pu
 metadata.objective    float, total generation cost
@@ -56,20 +59,20 @@ def _iter_examples(tar_path, limit=None):
 
 
 def _build_ybus(n_bus, branches, shunts):
-    """branches: (f, t, r, x, b_total, tap). shunts: (bus, gs, bs)."""
+    """branches: (f, t, r, x, b_fr, b_to, tap). shunts: (bus, gs, bs).
+
+    Transformer magnetizing susceptances (feature cols 9/10 in OPFData)
+    matter: without them, case118 labels show ~0.09 pu phantom Q mismatch
+    at transformer from-buses (found 2026-10-23; cols 9/10 equal exactly
+    the missing susceptance at buses 68 and 86)."""
     Y = np.zeros((n_bus, n_bus), dtype=complex)
-    for f, t, r, x, b, tap in branches:
+    for f, t, r, x, b_fr, b_to, tap in branches:
         y = 1.0 / (r + 1j * x)
-        if tap and tap > 0:
-            Y[f, f] += y / tap ** 2
-            Y[t, t] += y
-            Y[f, t] -= y / tap
-            Y[t, f] -= y / tap
-        else:
-            Y[f, f] += y + 1j * b / 2
-            Y[t, t] += y + 1j * b / 2
-            Y[f, t] -= y
-            Y[t, f] -= y
+        tap = tap if tap and tap > 0 else 1.0
+        Y[f, f] += y / tap ** 2 + 1j * b_fr
+        Y[t, t] += y + 1j * b_to
+        Y[f, t] -= y / tap
+        Y[t, f] -= y / tap
     for bus, gs, bs in shunts:
         Y[bus, bus] += gs + 1j * bs
     return Y
@@ -110,20 +113,20 @@ def _convert_example(ex):
                            vmin, vmax, c1 / 1000.0, c2 / 1000.0], axis=1)
     x = np.concatenate([pd[:, None], qd[:, None], static_bus], axis=1)
 
-    branches = []        # (f, t, r, x, b_total, tap)
+    branches = []        # (f, t, r, x, b_fr, b_to, tap)
     edge_index, edge_feat = [], []
     al = g["edges"]["ac_line"]
     for s, r_, f in zip(al["senders"], al["receivers"], al["features"]):
-        rr, xx, b = f[4], f[5], f[2] + f[3]
-        branches.append((s, r_, rr, xx, b, 0.0))
+        rr, xx = f[4], f[5]
+        branches.append((s, r_, rr, xx, f[2], f[3], 1.0))
         edge_index += [[s, r_], [r_, s]]
-        edge_feat += [[rr, xx, b, f[6]]] * 2
+        edge_feat += [[rr, xx, f[2] + f[3], f[6]]] * 2
     tr = g["edges"]["transformer"]
     for s, r_, f in zip(tr["senders"], tr["receivers"], tr["features"]):
         rr, xx, tap = f[2], f[3], f[7]
-        branches.append((s, r_, rr, xx, 0.0, tap))
+        branches.append((s, r_, rr, xx, f[9], f[10], tap))
         edge_index += [[s, r_], [r_, s]]
-        edge_feat += [[rr, xx, 0.0, f[4]]] * 2
+        edge_feat += [[rr, xx, f[9] + f[10], f[4]]] * 2
 
     shunts = [(int(b), float(gs), float(bs))
               for b, (bs, gs) in zip(shunt_bus, shunt)]  # stored [bs, gs]
@@ -163,7 +166,11 @@ def load_opfdata(tar_path, limit=None, verbose=True):
         "cost": np.array([c["cost"] for c in conv]),
         "pd": np.stack([c["pd"] for c in conv]),
         "qd": np.stack([c["qd"] for c in conv]),
-        "sol_pg": np.stack([c["sol_pg"] for c in conv]),
+        "sol_pg": np.stack([c["sol_pg"] for c in conv])
+        if len({len(c["sol_pg"]) for c in conv}) == 1
+        else [c["sol_pg"] for c in conv],
+        "gen_bus_list": [c["gen_bus"] for c in conv],
+        "gen_cost_list": [c["gen_cost"] for c in conv],
         "scale": np.ones(len(conv)),
         "static": {"static_bus": first["static_bus"],
                    "base_load_p": conv[0]["pd"], "base_load_q": conv[0]["qd"],
