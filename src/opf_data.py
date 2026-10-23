@@ -38,9 +38,14 @@ CASES = {"case14": pn.case14, "case57": pn.case57, "case118": pn.case118,
          "case300": pn.case300}
 
 
-def build_static(case_name):
-    """Static grid data: graph, features, Ybus, gen mapping (all pu)."""
-    net = CASES[case_name]()
+def build_static(case_name, net=None):
+    """Static grid data: graph, features, Ybus, gen mapping (all pu).
+
+    Pass a pre-built (possibly modified, e.g. an N-1 outage) pandapower net
+    to build the static data for that topology; defaults to the intact case.
+    """
+    if net is None:
+        net = CASES[case_name]()
     pp.runpp(net, numba=False)
     _, ppci = _pd2ppc(net)
     base = float(ppci["baseMVA"])
@@ -115,10 +120,14 @@ def build_static(case_name):
 
 
 def generate(case_name="case14", n_samples=500, load_lo=0.8, load_hi=1.2,
-             seed=0, verbose=True):
-    """Generate solved AC-OPF samples. Returns a dict of numpy arrays."""
+             seed=0, verbose=True, net=None):
+    """Generate solved AC-OPF samples. Returns a dict of numpy arrays.
+
+    Pass a modified pandapower `net` (e.g. with a line out of service) to
+    generate samples for a perturbed topology; the returned dict carries
+    that topology's edge_index / edge_feat / Ybus / static."""
     rng = np.random.default_rng(seed)
-    st = build_static(case_name)
+    st = build_static(case_name, net=net)
     net = st["_net"]
     base_p = net.load.p_mw.to_numpy().copy()
     base_q = net.load.q_mvar.to_numpy().copy()
@@ -155,7 +164,7 @@ def generate(case_name="case14", n_samples=500, load_lo=0.8, load_hi=1.2,
         "cost": np.array(costs), "scale": np.array(scales),
         "edge_index": st["edge_index"],
         "edge_feat": st["edge_feat"].astype(np.float32),
-        "Ybus": st["Ybus"], "static": st,
+        "Ybus": st["Ybus"], "static": st, "n_fail": n_fail,
     }
 
 

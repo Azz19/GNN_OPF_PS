@@ -22,6 +22,7 @@ feasibility write-up.
 | `src/device.py` | Device selection (`--device auto|cpu|cuda`); same scripts run on CPU and GPU |
 | `src/run_experiment.py` | Trains both models, reports MSE, PQ-bus power-balance violation (pu), inference time, parameter counts, and DEQ iteration statistics |
 | `src/run_experiment2.py` | Feasibility pivot: physics loss on/off × Newton correction on/off, with cost-gap and correction-distance reporting |
+| `src/evaluate_stress.py` | **Risk axis**: trains both predictors on the nominal load band, then evaluates the corrected pipeline on out-of-distribution stress splits — heavy loads (1.05–1.30×) and N-1 line outages — reporting tail metrics (p99/max violation, correction convergence rate, cost gap) |
 
 Message passing is plain-PyTorch (no torch-geometric dependency).
 
@@ -35,13 +36,16 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python src/run_experiment.py --case case118 --samples 5000 --epochs 100 --device cuda
 # feasibility experiment:
 .venv/bin/python src/run_experiment2.py --case case14 --samples 200 --epochs 10 --device auto
+# risk-axis stress evaluation (tail metrics under heavy loads and N-1 outages):
+.venv/bin/python src/evaluate_stress.py --case case14 --samples 200 --epochs 10 --device auto
 ```
 
 ## Roadmap
 
 1. **Experiment 1** (done, smoke scale): fixed-depth vs equilibrium processor, surrogate task — see `RESULTS_smoke.md`.
 2. **Experiment 2** (done, smoke scale): feasibility pivot — physics loss + Newton correction layer (`src/feasibility.py`, `src/run_experiment2.py`). Correction reaches exact feasibility in ~2 iterations; naive physics loss fails on optimality — see `RESULTS_exp2.md`. The correction layer is **model-agnostic**: it bolts onto any GNN predictor, not just DEQ-GNN.
-3. **Open problems** (current, per the Oct 22 pivot): ranked dissertation problems — primal-dual GNN warm-starting under the corrected WARP protocol, a GNN-native feasibility layer, "Falconer 2.0" (controlled study of when graph structure helps), cross-grid pretraining verification, and hardware-aware inference profiling (the empty niche; tail-made for the lab's GPU/FPGA angle).
+3. **Experiment 3** (done, smoke scale): risk-axis stress evaluation — heavy-load and N-1 stress splits with tail-metric reporting (`src/evaluate_stress.py`, `RESULTS_stress.md`). Feasibility holds under stress (Newton 100%); the risk lives in optimality tails under topology shift.
+4. **Open problems** (current, per the Oct 22 pivot): ranked dissertation problems — primal-dual GNN warm-starting under the corrected WARP protocol, a GNN-native feasibility layer, "Falconer 2.0" (controlled study of when graph structure helps), cross-grid pretraining verification, and hardware-aware inference profiling (the empty niche; tail-made for the lab's GPU/FPGA angle).
 
 ## Workflow
 
