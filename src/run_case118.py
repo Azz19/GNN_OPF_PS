@@ -13,7 +13,11 @@ subset sizes by default; scale up on the GPU workstation.
 Usage:
   python src/run_case118.py --train-n 800 --test-n 200 --epochs 6
 """
-import argparse, resource, sys, os, time
+import argparse, sys, os, time
+try:
+    import resource  # Unix only; absent on Windows
+except ImportError:
+    resource = None
 import numpy as np
 import torch
 import torch.nn as nn
@@ -29,7 +33,13 @@ CACHE = os.path.join(os.path.dirname(__file__), "..", "data_cache")
 
 
 def rss_mb():
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    if resource is not None:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / 1e6
+    except ImportError:
+        return float("nan")
 
 
 def train(model, d, n, epochs, dev):
