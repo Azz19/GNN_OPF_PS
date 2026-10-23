@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from opfdata_loader import load_opfdata, state_cost
 from opf_data import pq_violation
 from models import FixedDepthGNN, DEQGNN
-from feasibility import newton_correct
+from feasibility import newton_correct, limit_violations
 from device import resolve_device
 
 CACHE = os.path.join(os.path.dirname(__file__), "..", "data_cache")
@@ -61,6 +61,8 @@ def train(model, d, n, epochs, dev):
 
 def evaluate(model, d, idx, dev, per_example_topo=False):
     st = d["static"]
+    sb = st["static_bus"]  # [is_gen, is_slack, pmin, pmax, qmin, qmax,
+                           #  vmin, vmax, c1, c2]
     rows = []
     model.eval()
     for i in idx:
@@ -93,10 +95,16 @@ def evaluate(model, d, idx, dev, per_example_topo=False):
         cmx, _ = pq_violation(Ybus, cvm, cva, -d["pd"][i], -d["qd"][i], ~is_g)
         ccost = state_cost(Ybus, cvm, cva, d["pd"][i], gen_bus,
                            gen_cost, sol_pg)
+        # Inequality bounds the Newton layer does NOT enforce: how much
+        # the corrected state cheats to sit under the solver optimum.
+        clim = limit_violations(Ybus, cvm, cva, d["pd"][i], d["qd"][i],
+                                is_g, sb[:, 2], sb[:, 3], sb[:, 4], sb[:, 5],
+                                sb[:, 6], sb[:, 7])
         rows.append({"mse": mse, "viol_raw": mx, "viol_corr": cmx,
                      "cost_gap_pct": (ccost - d["cost"][i]) / d["cost"][i] * 100,
                      "conv": info["converged"], "iters": info["iters"],
-                     "t_inf_ms": t_inf * 1000, "t_cor_ms": t_cor * 1000})
+                     "t_inf_ms": t_inf * 1000, "t_cor_ms": t_cor * 1000,
+                     **clim})
     agg = {k: float(np.mean([r[k] for r in rows])) for k in
            ("mse", "viol_raw", "viol_corr", "cost_gap_pct", "iters",
             "t_inf_ms", "t_cor_ms")}
@@ -104,6 +112,11 @@ def evaluate(model, d, idx, dev, per_example_topo=False):
     agg["cost_gap_p99"] = float(np.percentile([r["cost_gap_pct"] for r in rows], 99))
     agg["cost_gap_max"] = float(np.max([r["cost_gap_pct"] for r in rows]))
     agg["conv_rate"] = float(np.mean([r["conv"] for r in rows]))
+    for k in ("lim_pg_max", "lim_pg_frac", "lim_qg_max", "lim_qg_frac",
+              "lim_vm_max", "lim_vm_frac"):
+        vals = [r[k] for r in rows]
+        agg[k] = float(np.mean(vals))
+        agg[k + "_max"] = float(np.max(vals))
     return agg
 
 
@@ -147,6 +160,13 @@ def main():
                   f"max {r['cost_gap_max']:+.2f}% | Newton conv {r['conv_rate']*100:.0f}% "
                   f"iters {r['iters']:.1f} | infer {r['t_inf_ms']:.1f} ms + corr "
                   f"{r['t_cor_ms']:.1f} ms")
+            print(f"    limit violations (corrected state): "
+                  f"Pg max {r['lim_pg_max']:.2e} pu "
+                  f"({r['lim_pg_frac']*100:.1f}% of gen buses OOB) | "
+                  f"Qg max {r['lim_qg_max']:.2e} pu "
+                  f"({r['lim_qg_frac']*100:.1f}% OOB) | "
+                  f"Vm max {r['lim_vm_max']:.2e} pu "
+                  f"({r['lim_vm_frac']*100:.1f}% of buses OOB)")
         print(f"  peak RSS: {rss_mb():.0f} MB")
 
 

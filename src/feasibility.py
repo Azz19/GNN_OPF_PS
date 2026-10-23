@@ -135,6 +135,40 @@ def newton_correct(Ybus, vm0, va0, pd, qd, is_gen, slack_bus=0,
     return vm, va, info
 
 
+# -------------------- inequality-limit violations --------------------
+
+def limit_violations(Ybus, vm, va, pd, qd, is_gen, pmin, pmax, qmin, qmax,
+                     vmin, vmax, tol=1e-4):
+    """How much a state cheats the inequality bounds the AC OPF enforces.
+
+    The Newton correction layer enforces only the power-balance EQUALITIES,
+    so a corrected state can sit "under" the solver's optimum by violating
+    generator P/Q limits or voltage bounds. Pg/Qg come from the injection
+    equations (Pg = P_inj + Pd, Qg = Q_inj + Qd) at generator buses; bus
+    limits are the sums over colocated generators (each gen occupies its
+    own bus in these grids). Vm is checked at every bus.
+
+    Returns per-metric: max out-of-bounds magnitude (pu) and the fraction
+    of gen buses / buses with any out-of-bounds value. `tol` guards the
+    OOB fractions against float32 residue at binding constraints."""
+    v = vm * np.exp(1j * va)
+    s = v * np.conj(Ybus @ v)
+    g = np.where(np.asarray(is_gen) > 0)[0]
+    pg = s.real[g] + pd[g]
+    qg = s.imag[g] + qd[g]
+    pg_viol = np.maximum(np.maximum(pg - pmax[g], pmin[g] - pg), 0.0)
+    qg_viol = np.maximum(np.maximum(qg - qmax[g], qmin[g] - qg), 0.0)
+    vm_viol = np.maximum(np.maximum(vm - vmax, vmin - vm), 0.0)
+    return {
+        "lim_pg_max": float(np.max(pg_viol, initial=0.0)),
+        "lim_pg_frac": float(np.mean(pg_viol > tol)) if len(g) else 0.0,
+        "lim_qg_max": float(np.max(qg_viol, initial=0.0)),
+        "lim_qg_frac": float(np.mean(qg_viol > tol)) if len(g) else 0.0,
+        "lim_vm_max": float(np.max(vm_viol, initial=0.0)),
+        "lim_vm_frac": float(np.mean(vm_viol > tol)),
+    }
+
+
 def derived_cost(Ybus, vm, va, pd, static_bus, base_mva=100.0):
     """Generation cost implied by a state: Pg at gen buses from the
     injection equations, priced with the quadratic cost features stored in

@@ -74,3 +74,25 @@ parsed shards as .npz for the 500/2000-bus steps.
 trains and corrects cleanly at 118 buses, at ~3× the training cost and
 ~10× the inference cost of the fixed-depth model, with ~5× fewer
 parameters.
+
+---
+
+## Follow-up: limit-violation metrics added to the evaluator
+
+The evaluator (`src/run_case118.py`) now reports inequality-limit
+violations for every corrected state, next to the cost gap, via
+`limit_violations()` in `src/feasibility.py`: max out-of-bounds magnitude
+(pu) and out-of-bounds rate for Pg vs [pmin, pmax], Qg vs [qmin, qmax]
+(gen buses, from the injection equations), and Vm vs [vmin, vmax] (all
+buses). OOB threshold is 1e-4 pu: verified that the OPFData solver labels
+themselves read as fully limit-feasible under it (fracs 0.0; max
+residuals ≤ ~1e-5 pu at binding constraints, i.e. honest float32 noise
+that does not count as OOB). The per-example generator mask comes from
+the example's own features, so N-1 examples that dropped a generator are
+handled correctly; static limits were verified identical across the
+FullTop and N-1 shards.
+
+Re-running the same command picks these up; the resulting table will
+show, for each model and split, how much of the negative cost gap is
+bought with limit violations — i.e. whether "beating the optimum" is
+limit-cheating, and by how much per axis.
