@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from opfdata_loader import load_opfdata, state_cost
 from opf_data import pq_violation
 from models import FixedDepthGNN, DEQGNN
-from feasibility import newton_correct, limit_violations
+from feasibility import newton_correct, newton_correct_limited, limit_violations
 from device import resolve_device
 
 CACHE = os.path.join(os.path.dirname(__file__), "..", "data_cache")
@@ -59,7 +59,7 @@ def train(model, d, n, epochs, dev):
     return time.perf_counter() - t0
 
 
-def evaluate(model, d, idx, dev, per_example_topo=False):
+def evaluate(model, d, idx, dev, per_example_topo=False, repair="both"):
     st = d["static"]
     sb = st["static_bus"]  # [is_gen, is_slack, pmin, pmax, qmin, qmax,
                            #  vmin, vmax, c1, c2]
@@ -88,35 +88,77 @@ def evaluate(model, d, idx, dev, per_example_topo=False):
         t_inf = time.perf_counter() - t0
         mse = float(np.mean((p - d["y"][i]) ** 2))
         mx, _ = pq_violation(Ybus, p[:, 0], p[:, 1], -d["pd"][i], -d["qd"][i], ~is_g)
-        t0 = time.perf_counter()
-        cvm, cva, info = newton_correct(Ybus, p[:, 0], p[:, 1], d["pd"][i],
-                                        d["qd"][i], is_g, slack_bus=sl)
-        t_cor = time.perf_counter() - t0
-        cmx, _ = pq_violation(Ybus, cvm, cva, -d["pd"][i], -d["qd"][i], ~is_g)
-        ccost = state_cost(Ybus, cvm, cva, d["pd"][i], gen_bus,
-                           gen_cost, sol_pg)
-        # Inequality bounds the Newton layer does NOT enforce: how much
-        # the corrected state cheats to sit under the solver optimum.
-        clim = limit_violations(Ybus, cvm, cva, d["pd"][i], d["qd"][i],
-                                is_g, sb[:, 2], sb[:, 3], sb[:, 4], sb[:, 5],
-                                sb[:, 6], sb[:, 7])
-        rows.append({"mse": mse, "viol_raw": mx, "viol_corr": cmx,
-                     "cost_gap_pct": (ccost - d["cost"][i]) / d["cost"][i] * 100,
-                     "conv": info["converged"], "iters": info["iters"],
-                     "t_inf_ms": t_inf * 1000, "t_cor_ms": t_cor * 1000,
-                     **clim})
+        row = {"mse": mse, "viol_raw": mx}
+        if repair in ("plain", "both"):
+            t0 = time.perf_counter()
+            cvm, cva, info = newton_correct(Ybus, p[:, 0], p[:, 1], d["pd"][i],
+                                            d["qd"][i], is_g, slack_bus=sl)
+            t_cor = time.perf_counter() - t0
+            cmx, _ = pq_violation(Ybus, cvm, cva, -d["pd"][i], -d["qd"][i], ~is_g)
+            ccost = state_cost(Ybus, cvm, cva, d["pd"][i], gen_bus,
+                               gen_cost, sol_pg)
+            # Inequality bounds the Newton layer does NOT enforce: how much
+            # the corrected state cheats to sit under the solver optimum.
+            clim = limit_violations(Ybus, cvm, cva, d["pd"][i], d["qd"][i],
+                                    is_g, sb[:, 2], sb[:, 3], sb[:, 4], sb[:, 5],
+                                    sb[:, 6], sb[:, 7])
+            row.update({"viol_corr": cmx,
+                        "cost_gap_pct": (ccost - d["cost"][i]) / d["cost"][i] * 100,
+                        "conv": info["converged"], "iters": info["iters"],
+                        "t_cor_ms": t_cor * 1000, **clim})
+        if repair in ("limited", "both"):
+            t0 = time.perf_counter()
+            lvm, lva, linfo = newton_correct_limited(
+                Ybus, p[:, 0], p[:, 1], d["pd"][i], d["qd"][i], is_g,
+                sb[:, 2], sb[:, 3], sb[:, 4], sb[:, 5], sb[:, 6], sb[:, 7],
+                slack_bus=sl)
+            t_lim = time.perf_counter() - t0
+            lmx, _ = pq_violation(Ybus, lvm, lva, -d["pd"][i], -d["qd"][i], ~is_g)
+            lcost = state_cost(Ybus, lvm, lva, d["pd"][i], gen_bus,
+                               gen_cost, sol_pg)
+            rlim = linfo["residual"]
+            row.update({"viol_corr_L": lmx,
+                        "cost_gap_L_pct": (lcost - d["cost"][i]) / d["cost"][i] * 100,
+                        "conv_L": linfo["converged"],
+                        "limited_ok": linfo["limited_ok"],
+                        "iters_L": linfo["iters"], "outer_L": linfo["outer_iters"],
+                        "nrepairs_L": len(linfo["repairs"]),
+                        "t_lim_ms": t_lim * 1000,
+                        "rlim_pg_max": rlim["lim_pg_max"],
+                        "rlim_qg_max": rlim["lim_qg_max"],
+                        "rlim_vm_max": rlim["lim_vm_max"],
+                        "rlim_pg_frac": rlim["lim_pg_frac"],
+                        "rlim_qg_frac": rlim["lim_qg_frac"],
+                        "rlim_vm_frac": rlim["lim_vm_frac"]})
+        row["t_inf_ms"] = t_inf * 1000
+        rows.append(row)
     agg = {k: float(np.mean([r[k] for r in rows])) for k in
-           ("mse", "viol_raw", "viol_corr", "cost_gap_pct", "iters",
-            "t_inf_ms", "t_cor_ms")}
-    agg["viol_corr_max"] = float(np.max([r["viol_corr"] for r in rows]))
-    agg["cost_gap_p99"] = float(np.percentile([r["cost_gap_pct"] for r in rows], 99))
-    agg["cost_gap_max"] = float(np.max([r["cost_gap_pct"] for r in rows]))
-    agg["conv_rate"] = float(np.mean([r["conv"] for r in rows]))
-    for k in ("lim_pg_max", "lim_pg_frac", "lim_qg_max", "lim_qg_frac",
-              "lim_vm_max", "lim_vm_frac"):
-        vals = [r[k] for r in rows]
-        agg[k] = float(np.mean(vals))
-        agg[k + "_max"] = float(np.max(vals))
+           ("mse", "viol_raw", "t_inf_ms")}
+    if repair in ("plain", "both"):
+        for k in ("viol_corr", "cost_gap_pct", "iters", "t_cor_ms"):
+            agg[k] = float(np.mean([r[k] for r in rows]))
+        agg["viol_corr_max"] = float(np.max([r["viol_corr"] for r in rows]))
+        agg["cost_gap_p99"] = float(np.percentile([r["cost_gap_pct"] for r in rows], 99))
+        agg["cost_gap_max"] = float(np.max([r["cost_gap_pct"] for r in rows]))
+        agg["conv_rate"] = float(np.mean([r["conv"] for r in rows]))
+        for k in ("lim_pg_max", "lim_pg_frac", "lim_qg_max", "lim_qg_frac",
+                  "lim_vm_max", "lim_vm_frac"):
+            vals = [r[k] for r in rows]
+            agg[k] = float(np.mean(vals))
+            agg[k + "_max"] = float(np.max(vals))
+    if repair in ("limited", "both"):
+        for k in ("viol_corr_L", "cost_gap_L_pct", "iters_L", "outer_L",
+                  "nrepairs_L", "t_lim_ms"):
+            agg[k] = float(np.mean([r[k] for r in rows]))
+        agg["cost_gap_L_p99"] = float(np.percentile([r["cost_gap_L_pct"] for r in rows], 99))
+        agg["cost_gap_L_max"] = float(np.max([r["cost_gap_L_pct"] for r in rows]))
+        agg["limited_ok_rate"] = float(np.mean([r["limited_ok"] for r in rows]))
+        agg["conv_L_rate"] = float(np.mean([r["conv_L"] for r in rows]))
+        for k in ("rlim_pg_max", "rlim_qg_max", "rlim_vm_max",
+                  "rlim_pg_frac", "rlim_qg_frac", "rlim_vm_frac"):
+            vals = [r[k] for r in rows]
+            agg[k] = float(np.mean(vals))
+            agg[k + "_max"] = float(np.max(vals))
     return agg
 
 
@@ -127,6 +169,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--device", default="auto",
                     help="auto|cpu|cuda (auto picks cuda when available)")
+    ap.add_argument("--repair", default="both", choices=["plain", "limited", "both"],
+                    help="which correction layer(s) to evaluate: the plain "
+                         "Newton power-balance repair, the limit-aware repair, "
+                         "or both side by side")
     args = ap.parse_args()
     dev = resolve_device(args.device)
     print(f"Device: {dev}")
@@ -147,26 +193,42 @@ def main():
         npar = sum(p.numel() for p in model.parameters())
         model = model.to(dev)
         tt = train(model, dtr, args.train_n, args.epochs, dev)
-        r_ft = evaluate(model, dte, range(args.test_n), dev)
+        r_ft = evaluate(model, dte, range(args.test_n), dev,
+                        repair=args.repair)
         r_n1 = evaluate(model, dn1, range(args.test_n), dev,
-                        per_example_topo=True)
+                        per_example_topo=True, repair=args.repair)
         print(f"\n== {name} ({npar:,} params, {npar*4/1024:.0f} KiB fp32) ==")
         print(f"  train: {tt:.0f}s for {args.train_n}x{args.epochs} "
               f"({tt/(args.train_n*args.epochs)*1000:.0f} ms/sample-epoch)")
         for tag, r in [("FullTop test", r_ft), ("N-1 zero-shot", r_n1)]:
-            print(f"  [{tag}] MSE {r['mse']:.2e} | viol raw {r['viol_raw']:.4f} -> "
-                  f"corr {r['viol_corr']:.2e} (max {r['viol_corr_max']:.2e}) pu | "
-                  f"cost gap mean {r['cost_gap_pct']:+.2f}% p99 {r['cost_gap_p99']:+.2f}% "
-                  f"max {r['cost_gap_max']:+.2f}% | Newton conv {r['conv_rate']*100:.0f}% "
-                  f"iters {r['iters']:.1f} | infer {r['t_inf_ms']:.1f} ms + corr "
-                  f"{r['t_cor_ms']:.1f} ms")
-            print(f"    limit violations (corrected state): "
-                  f"Pg max {r['lim_pg_max']:.2e} pu "
-                  f"({r['lim_pg_frac']*100:.1f}% of gen buses OOB) | "
-                  f"Qg max {r['lim_qg_max']:.2e} pu "
-                  f"({r['lim_qg_frac']*100:.1f}% OOB) | "
-                  f"Vm max {r['lim_vm_max']:.2e} pu "
-                  f"({r['lim_vm_frac']*100:.1f}% of buses OOB)")
+            if args.repair in ("plain", "both"):
+                print(f"  [{tag}] MSE {r['mse']:.2e} | viol raw {r['viol_raw']:.4f} -> "
+                      f"corr {r['viol_corr']:.2e} (max {r['viol_corr_max']:.2e}) pu | "
+                      f"cost gap mean {r['cost_gap_pct']:+.2f}% p99 {r['cost_gap_p99']:+.2f}% "
+                      f"max {r['cost_gap_max']:+.2f}% | Newton conv {r['conv_rate']*100:.0f}% "
+                      f"iters {r['iters']:.1f} | infer {r['t_inf_ms']:.1f} ms + corr "
+                      f"{r['t_cor_ms']:.1f} ms")
+                print(f"    limit violations (corrected state): "
+                      f"Pg max {r['lim_pg_max']:.2e} pu "
+                      f"({r['lim_pg_frac']*100:.1f}% of gen buses OOB) | "
+                      f"Qg max {r['lim_qg_max']:.2e} pu "
+                      f"({r['lim_qg_frac']*100:.1f}% OOB) | "
+                      f"Vm max {r['lim_vm_max']:.2e} pu "
+                      f"({r['lim_vm_frac']*100:.1f}% of buses OOB)")
+            if args.repair in ("limited", "both"):
+                print(f"  [{tag}] LIMIT-AWARE repair: viol {r['viol_corr_L']:.2e} pu | "
+                      f"cost gap mean {r['cost_gap_L_pct']:+.2f}% p99 {r['cost_gap_L_p99']:+.2f}% "
+                      f"max {r['cost_gap_L_max']:+.2f}% | fully limit-clean "
+                      f"{r['limited_ok_rate']*100:.0f}% | Newton conv "
+                      f"{r['conv_L_rate']*100:.0f}% | outer {r['outer_L']:.1f} iters, "
+                      f"{r['nrepairs_L']:.1f} repairs | corr {r['t_lim_ms']:.1f} ms")
+                print(f"    residual violations (limited repair): "
+                      f"Pg max {r['rlim_pg_max']:.2e} pu "
+                      f"({r['rlim_pg_frac']*100:.1f}% OOB) | "
+                      f"Qg max {r['rlim_qg_max']:.2e} pu "
+                      f"({r['rlim_qg_frac']*100:.1f}% OOB) | "
+                      f"Vm max {r['rlim_vm_max']:.2e} pu "
+                      f"({r['rlim_vm_frac']*100:.1f}% OOB)")
         print(f"  peak RSS: {rss_mb():.0f} MB")
 
 
