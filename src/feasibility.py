@@ -81,30 +81,13 @@ def _mismatch_and_jacobian(Ybus, vm, va, p_spec, q_spec, va_idx, vm_idx):
     return mis, J
 
 
-def newton_correct(Ybus, vm0, va0, pd, qd, is_gen, slack_bus=0,
-                   tol=1e-4, max_iter=50):
-    # tol 1e-4 pu: targets are stored float32, which puts a ~1e-6 floor under
-    # the achievable mismatch; 1e-4 is still ~1000x tighter than any raw
-    # network prediction in these experiments. A stall break (tiny step)
-    # also counts as convergence.
-    """Correct a predicted state to power-balance feasibility.
-
-    Returns (vm, va, info) with info: converged, iters, final max mismatch
-    (pu, over ALL specified equations), and state movement (max |dVm|,
-    max |dVa| in rad)."""
+def _pf_solve(Ybus, vm0, va0, p_spec, q_spec, va_idx, vm_idx,
+              tol=1e-4, max_iter=50):
+    """Polar Newton-Raphson core: solve P at the va_idx buses and Q at the
+    vm_idx (PQ) buses to the given setpoints, starting from (vm0, va0).
+    Returns (vm, va, info) with converged / iters / final max mismatch
+    (pu, over the specified equations)."""
     vm, va = vm0.copy(), va0.copy()
-    n = len(vm)
-    pq_mask = ~is_gen
-    # derived PV active-power setpoints from the predicted state
-    v0 = vm0 * np.exp(1j * va0)
-    s0 = v0 * np.conj(Ybus @ v0)
-    p_spec = -pd.copy()
-    gen_buses = np.where(is_gen)[0]
-    p_spec[gen_buses] = s0.real[gen_buses]  # net injection implied by prediction
-    q_spec = -qd.copy()
-
-    va_idx = np.array([i for i in range(n) if i != slack_bus])
-    vm_idx = np.where(pq_mask)[0]
 
     def full_mismatch(vm_, va_):
         v_ = vm_ * np.exp(1j * va_)
@@ -129,13 +112,201 @@ def newton_correct(Ybus, vm0, va0, pd, qd, is_gen, slack_bus=0,
         final = full_mismatch(vm, va)
         converged = final < tol or np.max(np.abs(dx)) < 1e-10
     info = {"converged": bool(converged), "iters": iters,
-            "final_mismatch_pu": float(final),
+            "final_mismatch_pu": float(final)}
+    return vm, va, info
+
+
+def bus_dispatch(Ybus, vm, va, pd, qd):
+    """Bus-level generation implied by a state: Pg = P_inj + Pd and
+    Qg = Q_inj + Qd at every bus (meaningful at generator buses)."""
+    v = vm * np.exp(1j * va)
+    s = v * np.conj(Ybus @ v)
+    return s.real + pd, s.imag + qd
+
+
+def newton_correct(Ybus, vm0, va0, pd, qd, is_gen, slack_bus=0,
+                   tol=1e-4, max_iter=50):
+    # tol 1e-4 pu: targets are stored float32, which puts a ~1e-6 floor under
+    # the achievable mismatch; 1e-4 is still ~1000x tighter than any raw
+    # network prediction in these experiments. A stall break (tiny step)
+    # also counts as convergence.
+    """Correct a predicted state to power-balance feasibility.
+
+    Returns (vm, va, info) with info: converged, iters, final max mismatch
+    (pu, over ALL specified equations), and state movement (max |dVm|,
+    max |dVa| in rad)."""
+    n = len(vm0)
+    is_gen_b = np.asarray(is_gen) > 0
+    pq_mask = ~is_gen_b
+    # derived PV active-power setpoints from the predicted state
+    v0 = vm0 * np.exp(1j * va0)
+    s0 = v0 * np.conj(Ybus @ v0)
+    p_spec = -pd.copy()
+    gen_buses = np.where(is_gen_b)[0]
+    p_spec[gen_buses] = s0.real[gen_buses]  # net injection implied by prediction
+    q_spec = -qd.copy()
+
+    va_idx = np.array([i for i in range(n) if i != slack_bus])
+    vm_idx = np.where(pq_mask)[0]
+    vm, va, info = _pf_solve(Ybus, vm0, va0, p_spec, q_spec, va_idx, vm_idx,
+                             tol=tol, max_iter=max_iter)
+    info["move_vm_max"] = float(np.max(np.abs(vm - vm0)))
+    info["move_va_max"] = float(np.max(np.abs(va - va0)))
+    return vm, va, info
+
+
+def balance_mismatch(Ybus, vm, va, pd, qd, is_gen, pg_setpoints,
+                     slack_bus=0):
+    """Max power-balance mismatch (pu) of a state against a dispatch:
+    P at every non-slack bus (generator buses specified by pg_setpoints,
+    load buses by -pd) and Q at PQ buses (-qd) — the same convention as
+    the Newton solver's own convergence check. A stage that clips its
+    dispatch without re-solving (audit stage 3) shows up here instead of
+    hiding inside the limit metrics."""
+    is_gen_b = np.asarray(is_gen) > 0
+    v = vm * np.exp(1j * va)
+    s = v * np.conj(Ybus @ v)
+    p_spec = -pd.copy()
+    g = np.where(is_gen_b)[0]
+    p_spec[g] = pg_setpoints[g] - pd[g]
+    non_slack = np.array([i for i in range(len(vm)) if i != slack_bus])
+    pq = np.where(~is_gen_b)[0]
+    mp = np.abs(p_spec[non_slack] - s.real[non_slack]).max(initial=0.0)
+    mq = np.abs(-qd[pq] - s.imag[pq]).max(initial=0.0)
+    return float(max(mp, mq))
+
+
+def clip_dispatch(Ybus, vm, va, pd, qd, is_gen, pmin, pmax, qmin, qmax,
+                  vmin, vmax):
+    """Naive clip baseline (Paper 1 audit stage 3): clip the corrected
+    state's implied Pg/Qg and its Vm to their limits, with NO re-solve.
+    The clipped dispatch satisfies the limits by construction but
+    generally breaks power balance — score it with balance_mismatch()
+    against the clipped setpoints to expose that. Returns
+    (vm_clipped, pg_clipped, qg_clipped) as bus-level arrays."""
+    pg, qg = bus_dispatch(Ybus, vm, va, pd, qd)
+    pg_c, qg_c = pg.copy(), qg.copy()
+    g = np.where(np.asarray(is_gen) > 0)[0]
+    pg_c[g] = np.clip(pg[g], pmin[g], pmax[g])
+    qg_c[g] = np.clip(qg[g], qmin[g], qmax[g])
+    vm_c = np.clip(vm, vmin, vmax)
+    return vm_c, pg_c, qg_c
+
+
+def newton_correct_distributed(Ybus, vm0, va0, pd, qd, is_gen, pmin, pmax,
+                               slack_bus=0, tol=1e-4, oob_tol=1e-4,
+                               max_iter=50, max_rounds=25):
+    """Paper 1, slack-decoding variant B — headroom-proportional
+    distributed slack.
+
+    Runs the plain correction first (variant A behaviour: the slack bus
+    absorbs the entire balance residual). If the slack generator's Pg
+    then sits outside [pmin, pmax], the excess is moved to the other
+    generators in proportion to their remaining headroom (pmax - Pg)
+    when the slack is over pmax, or in proportion to (Pg - pmin) when it
+    is under pmin; the PF solve is repeated with the updated Pg
+    setpoints, and the loop repeats until the slack is inside its limits
+    or no headroom remains. Failure is reported honestly via
+    info["distributed_ok"] = False — the slack is never silently
+    clipped, and no setpoint is ever pushed past its own limit (each
+    shift is capped by that generator's room).
+
+    Returns (vm, va, info): converged (final PF solve), iters (total
+    Newton iterations across all solves), rounds, distributed_ok,
+    slack_pg_viol_before / _after (pu beyond-limit magnitude), and
+    final_mismatch_pu of the last solve."""
+    is_gen_b = np.asarray(is_gen) > 0
+    gen_buses = np.where(is_gen_b)[0]
+    n = len(vm0)
+    va_idx = np.array([i for i in range(n) if i != slack_bus])
+    vm_idx = np.where(~is_gen_b)[0]
+    q_spec = -qd.copy()
+
+    vm, va, info = newton_correct(Ybus, vm0, va0, pd, qd, is_gen_b,
+                                  slack_bus=slack_bus, tol=tol,
+                                  max_iter=max_iter)
+    total_iters = info["iters"]
+    converged = info["converged"]
+    final_mismatch = info["final_mismatch_pu"]
+
+    def slack_viol(pg_):
+        return max(pg_[slack_bus] - pmax[slack_bus],
+                   pmin[slack_bus] - pg_[slack_bus], 0.0)
+
+    pg, _ = bus_dispatch(Ybus, vm, va, pd, qd)
+    viol_before = float(slack_viol(pg))
+    rounds = 0
+    ok = viol_before <= oob_tol
+    while not ok and rounds < max_rounds:
+        over = pg[slack_bus] > pmax[slack_bus]
+        if over:
+            need = pg[slack_bus] - pmax[slack_bus]
+            room = np.maximum(pmax - pg, 0.0)
+        else:
+            need = pmin[slack_bus] - pg[slack_bus]
+            room = np.maximum(pg - pmin, 0.0)
+        room[~is_gen_b] = 0.0
+        room[slack_bus] = 0.0
+        total_room = float(room.sum())
+        if total_room <= 1e-12:
+            break  # no headroom anywhere: honest failure, reported below
+        shift = room / total_room * min(need, total_room)
+        pg_set = pg + shift if over else pg - shift
+        p_spec = -pd.copy()
+        p_spec[gen_buses] = pg_set[gen_buses] - pd[gen_buses]
+        vm, va, sinfo = _pf_solve(Ybus, vm, va, p_spec, q_spec,
+                                  va_idx, vm_idx, tol=tol,
+                                  max_iter=max_iter)
+        total_iters += sinfo["iters"]
+        converged = sinfo["converged"]
+        final_mismatch = sinfo["final_mismatch_pu"]
+        rounds += 1
+        pg, _ = bus_dispatch(Ybus, vm, va, pd, qd)
+        ok = float(slack_viol(pg)) <= oob_tol
+        if not converged:
+            break
+    info = {"converged": bool(converged), "iters": total_iters,
+            "rounds": rounds, "distributed_ok": bool(ok),
+            "slack_pg_viol_before": viol_before,
+            "slack_pg_viol_after": float(slack_viol(pg)),
+            "final_mismatch_pu": float(final_mismatch),
             "move_vm_max": float(np.max(np.abs(vm - vm0))),
             "move_va_max": float(np.max(np.abs(va - va0)))}
     return vm, va, info
 
 
 # -------------------- inequality-limit violations --------------------
+
+def _oob_summary(pg, qg, vm, is_gen, pmin, pmax, qmin, qmax, vmin, vmax,
+                 slack_bus, tol):
+    """Shared out-of-bounds accounting over bus-level Pg/Qg/Vm arrays.
+
+    Carries the original limit_violations() metrics (max magnitude and
+    fraction of gen buses / buses OOB) plus the Paper 1 audit extras:
+    per-class any-OOB flags for THIS example, overall feasibility, and
+    the slack generator's Pg violation reported separately (0.0 when the
+    slack bus hosts no generator)."""
+    g = np.where(np.asarray(is_gen) > 0)[0]
+    pg_viol = np.maximum(np.maximum(pg[g] - pmax[g], pmin[g] - pg[g]), 0.0)
+    qg_viol = np.maximum(np.maximum(qg[g] - qmax[g], qmin[g] - qg[g]), 0.0)
+    vm_viol = np.maximum(np.maximum(vm - vmax, vmin - vm), 0.0)
+    out = {
+        "lim_pg_max": float(np.max(pg_viol, initial=0.0)),
+        "lim_pg_frac": float(np.mean(pg_viol > tol)) if len(g) else 0.0,
+        "lim_qg_max": float(np.max(qg_viol, initial=0.0)),
+        "lim_qg_frac": float(np.mean(qg_viol > tol)) if len(g) else 0.0,
+        "lim_vm_max": float(np.max(vm_viol, initial=0.0)),
+        "lim_vm_frac": float(np.mean(vm_viol > tol)),
+        "pg_oob": bool(np.max(pg_viol, initial=0.0) > tol),
+        "qg_oob": bool(np.max(qg_viol, initial=0.0) > tol),
+        "vm_oob": bool(np.max(vm_viol, initial=0.0) > tol),
+    }
+    out["feasible"] = not (out["pg_oob"] or out["qg_oob"] or out["vm_oob"])
+    pos = np.where(g == slack_bus)[0]
+    out["slack_pg_viol"] = float(pg_viol[pos[0]]) if len(pos) else 0.0
+    out["slack_pg_oob"] = bool(out["slack_pg_viol"] > tol)
+    return out
+
 
 def limit_violations(Ybus, vm, va, pd, qd, is_gen, pmin, pmax, qmin, qmax,
                      vmin, vmax, tol=1e-4):
@@ -151,22 +322,30 @@ def limit_violations(Ybus, vm, va, pd, qd, is_gen, pmin, pmax, qmin, qmax,
     Returns per-metric: max out-of-bounds magnitude (pu) and the fraction
     of gen buses / buses with any out-of-bounds value. `tol` guards the
     OOB fractions against float32 residue at binding constraints."""
-    v = vm * np.exp(1j * va)
-    s = v * np.conj(Ybus @ v)
-    g = np.where(np.asarray(is_gen) > 0)[0]
-    pg = s.real[g] + pd[g]
-    qg = s.imag[g] + qd[g]
-    pg_viol = np.maximum(np.maximum(pg - pmax[g], pmin[g] - pg), 0.0)
-    qg_viol = np.maximum(np.maximum(qg - qmax[g], qmin[g] - qg), 0.0)
-    vm_viol = np.maximum(np.maximum(vm - vmax, vmin - vm), 0.0)
-    return {
-        "lim_pg_max": float(np.max(pg_viol, initial=0.0)),
-        "lim_pg_frac": float(np.mean(pg_viol > tol)) if len(g) else 0.0,
-        "lim_qg_max": float(np.max(qg_viol, initial=0.0)),
-        "lim_qg_frac": float(np.mean(qg_viol > tol)) if len(g) else 0.0,
-        "lim_vm_max": float(np.max(vm_viol, initial=0.0)),
-        "lim_vm_frac": float(np.mean(vm_viol > tol)),
-    }
+    pg, qg = bus_dispatch(Ybus, vm, va, pd, qd)
+    s = _oob_summary(pg, qg, vm, is_gen, pmin, pmax, qmin, qmax, vmin, vmax,
+                     slack_bus=-1, tol=tol)
+    return {k: s[k] for k in ("lim_pg_max", "lim_pg_frac", "lim_qg_max",
+                              "lim_qg_frac", "lim_vm_max", "lim_vm_frac")}
+
+
+def limit_violation_detail(Ybus, vm, va, pd, qd, is_gen, pmin, pmax, qmin,
+                           qmax, vmin, vmax, slack_bus=0, tol=1e-4):
+    """limit_violations() plus the Paper 1 audit extras for one example:
+    per-class any-OOB flags, overall `feasible` (zero OOB on Pg, Qg and
+    Vm at `tol`), and the slack generator's Pg violation on its own."""
+    pg, qg = bus_dispatch(Ybus, vm, va, pd, qd)
+    return _oob_summary(pg, qg, vm, is_gen, pmin, pmax, qmin, qmax, vmin,
+                        vmax, slack_bus=slack_bus, tol=tol)
+
+
+def dispatch_violation_detail(pg, qg, vm, is_gen, pmin, pmax, qmin, qmax,
+                              vmin, vmax, slack_bus=0, tol=1e-4):
+    """Same summary as limit_violation_detail() but for a dispatch given
+    directly as bus-level Pg/Qg/Vm arrays — the clip stage, whose
+    dispatch is not a solved state."""
+    return _oob_summary(pg, qg, vm, is_gen, pmin, pmax, qmin, qmax, vmin,
+                        vmax, slack_bus=slack_bus, tol=tol)
 
 
 def derived_cost(Ybus, vm, va, pd, static_bus, base_mva=100.0):
